@@ -2,6 +2,7 @@ from utils import get_base_dir, get_threads_account, load_driver
 
 import time
 import logging
+import json
 
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -24,20 +25,26 @@ logging.basicConfig(level=logging.DEBUG,
 # ============================================================================================
 # MAIN FUNCTION
 # ============================================================================================
+import time
+import logging
+import json
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException
+
 def scrape_posts(driver, max_scrolls=10):
     """
     Hàm này thực hiện cuộn trang để tải tất cả bài viết và sau đó bóc tách dữ liệu.
+    *** PHIÊN BẢN HOÀN CHỈNH: Sửa lỗi dữ liệu lặp lại và sai lệch. ***
     """
     print("Bắt đầu quá trình lướt trang để tải dữ liệu...")
     
     # --- PHẦN 1: LƯỚT VÔ CỰC (Không đổi) ---
+    # ... (giữ nguyên code cuộn trang)
     last_height = driver.execute_script("return document.body.scrollHeight")
     scroll_count = 0
-    
     while scroll_count < max_scrolls:
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(3)
-        
+        time.sleep(3.5)
         new_height = driver.execute_script("return document.body.scrollHeight")
         if new_height == last_height:
             print("Đã lướt đến cuối trang.")
@@ -46,68 +53,104 @@ def scrape_posts(driver, max_scrolls=10):
         scroll_count += 1
         print(f"Đã lướt lần thứ {scroll_count}...")
 
+
     print("Quá trình lướt trang hoàn tất. Bắt đầu thu thập dữ liệu...")
 
-    # --- PHẦN 2: BÓC TÁCH DỮ LIỆU ---
     all_posts_data = []
     
-    # [SELECTOR MỚI] Dựa trên việc mỗi post phải có link user và thẻ time. Rất ổn định.
-    post_elements = driver.find_elements(By.XPATH, "//div[.//a[contains(@href, '/@')] and .//time[@datetime]]")
+    # [SỬA LỖI #1] Sử dụng selector chính xác hơn để tránh lặp dữ liệu
+    post_elements = driver.find_elements(By.XPATH, "//div[@data-pressable-container='true']/div/div[2]")
     
-    print(f"Tìm thấy tổng cộng {len(post_elements)} bài viết.")
+    print(f"Tìm thấy tổng cộng {len(post_elements)} bài viết tiềm năng.")
 
     for i, post in enumerate(post_elements):
-        post_data = {}
+        post_data = { 'username': None, 'profile_url': None, 'content': None, 'post_time_text': None, 
+                      'post_datetime': None, 'post_url': None, 'likes': 0, 'replies': 0, 'reposts': 0, 'shares': 0 }
+
+        # [SỬA LỖI #2] Làm cho các selector con "chặt chẽ" hơn
+        
+        # Khu vực header chứa username và time
+        header_area = None
         try:
-            # 1. Lấy Tên User và Link Profile
-            # Vẫn dùng selector cũ vì nó khá ổn định
-            user_element = post.find_element(By.XPATH, ".//a[contains(@href, '/@')]")
-            # Lấy username từ span trong cùng để đảm bảo sạch
-            post_data['username'] = user_element.find_element(By.XPATH, ".//span/span").text
+            header_area = post.find_element(By.XPATH, "./div[1]")
+        except NoSuchElementException:
+            continue # Nếu không có header thì bỏ qua bài viết này
+
+        try:
+            user_element = header_area.find_element(By.XPATH, ".//a[contains(@href, '/@')]")
+            post_data['username'] = user_element.get_attribute('textContent').strip()
             post_data['profile_url'] = user_element.get_attribute('href')
+        except NoSuchElementException: pass
 
-            # 2. Lấy Nội dung bài viết
-            # [SELECTOR MỚI] Tìm span có dir='auto' không nằm trong link <a>
-            content_element = post.find_element(By.XPATH, ".//span[@dir='auto' and not(ancestor::a)]/span")
-            post_data['content'] = content_element.text
+        # Khu vực body chứa content và các nút actions
+        body_area = None
+        try:
+            body_area = post.find_element(By.XPATH, "./div[2]")
+        except NoSuchElementException:
+             pass # Một số post có thể không có body (chỉ có header)
 
-            # 3. Lấy Thời gian đăng bài và Link bài viết
-            time_element = post.find_element(By.TAG_NAME, 'time')
-            post_data['post_time_text'] = time_element.text
+        if body_area:
+            try:
+                content_element = body_area.find_element(By.XPATH, ".//span[@dir='auto']")
+                raw_content = content_element.get_attribute('textContent').strip()
+                post_data['content'] = raw_content.replace('Translate', '').strip()
+            except NoSuchElementException:
+                post_data['content'] = ""
+
+            actions = { 'likes': ('Thích', 'Like'), 'replies': ('Trả lời', 'Reply'), 
+                        'reposts': ('Đăng lại', 'Repost'), 'shares': ('Chia sẻ', 'Share') }
+            
+            for key, (label_vi, label_en) in actions.items():
+                try:
+                    xpath = f".//svg[@aria-label='{label_vi}' or @aria-label='{label_en}']/ancestor::div[@role='button']//span[contains(@class, 'x1o0tod')]"
+                    number_span = body_area.find_element(By.XPATH, xpath)
+                    post_data['key'] = number_span.get_attribute('textContent').strip()
+                except NoSuchElementException: pass
+
+        try:
+            time_element = header_area.find_element(By.TAG_NAME, 'time')
+            post_data['post_time_text'] = time_element.get_attribute('textContent').strip()
             post_data['post_datetime'] = time_element.get_attribute('datetime')
             post_data['post_url'] = time_element.find_element(By.XPATH, "./parent::a").get_attribute('href')
-            
-            # 4. Lấy Likes, Replies, Reposts, Shares một cách linh hoạt
-            # [CÁCH TIẾP CẬN MỚI] Dùng vòng lặp và aria-label
-            actions = {
-                'likes': 'Thích',
-                'replies': 'Trả lời',
-                'reposts': 'Đăng lại',
-                'shares': 'Chia sẻ'
-            }
-            
-            for key, label in actions.items():
-                try:
-                    # Tìm div nút bấm dựa vào aria-label của svg bên trong
-                    button_div = post.find_element(By.XPATH, f".//div[@role='button' and .//svg[@aria-label='{label}']]")
-                    # Tìm số liệu bên trong nút đó
-                    number_span = button_div.find_element(By.XPATH, ".//span[contains(@class, 'x1o0tod')]")
-                    post_data[key] = number_span.text
-                except NoSuchElementException:
-                    # Nếu không tìm thấy (ví dụ bài viết 0 like), gán giá trị 0
-                    post_data[key] = 0
-            
+        except NoSuchElementException: pass
+        
+        if post_data.get('post_url'):
             all_posts_data.append(post_data)
-
-        except Exception as e:
-            logging.warning(f"Bỏ qua bài viết #{i+1} do lỗi: {e.__class__.__name__} - {e}")
+        else:
+            logging.warning(f"Bỏ qua một thẻ div vì không có thông tin định danh (URL).")
             
+    # [SỬA LỖI #1] Xử lý hậu kỳ để loại bỏ các bản ghi trùng lặp
+    # Dùng dictionary để loại bỏ các bài viết có post_url trùng nhau, chỉ giữ lại bản ghi cuối cùng
+    unique_posts = {p['post_url']: p for p in all_posts_data if p['post_url']}
+    all_posts_data = list(unique_posts.values())
+
     return all_posts_data
 
+
+def save_to_json(data_list, filename):
+    """
+    Hàm này lưu một danh sách các dictionary vào file JSON.
+
+    Args:
+        data_list (list): Danh sách các dictionary chứa dữ liệu.
+        filename (str): Tên file để lưu (ví dụ: 'posts.json').
+    """
+    if not data_list:
+        print("Không có dữ liệu để lưu vào file JSON.")
+        return
+
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            # ensure_ascii=False để lưu ký tự tiếng Việt đúng chuẩn
+            # indent=2 để file JSON được định dạng đẹp, dễ đọc
+            json.dump(data_list, f, ensure_ascii=False, indent=2)
+        print(f"✅ Đã lưu thành công {len(data_list)} mục vào file: {filename}")
+    except IOError as e:
+        print(f"❌ Đã xảy ra lỗi khi ghi file: {e}")
 # ============================================================================================
 # PIPELINE
 # ============================================================================================
-def pipeline(USERNAME, PASSWORD, keywords):
+def pipeline(USERNAME, PASSWORD, keywords, scroll_per_keyword):
     keywords = ["AI Engineer Job"]
 
     driver = load_driver()
@@ -148,7 +191,7 @@ def pipeline(USERNAME, PASSWORD, keywords):
         # Ignore pop-ups if they appear
         try:
             # Chờ tối đa 10 giây cho nút 'Not Now' hoặc 'Lúc khác'
-            not_now_button_save_info = WebDriverWait(driver, 10).until(
+            not_now_button_save_info = WebDriverWait(driver, 1).until(
                 EC.element_to_be_clickable((By.XPATH, "//div[@role='button' and (text()='Not Now' or text()='Lúc khác')]"))
             )
             not_now_button_save_info.click()
@@ -157,7 +200,7 @@ def pipeline(USERNAME, PASSWORD, keywords):
 
         try:
             # Chờ tối đa 10 giây cho nút 'Not Now' hoặc 'Lúc khác'
-            not_now_button_notifications = WebDriverWait(driver, 10).until(
+            not_now_button_notifications = WebDriverWait(driver, 1).until(
                 EC.element_to_be_clickable((By.XPATH, "//button[text()='Not Now' or text()='Lúc khác']"))
             )
             not_now_button_notifications.click()
@@ -171,35 +214,62 @@ def pipeline(USERNAME, PASSWORD, keywords):
 
         for keyword in keywords:
             print(f"Đang tìm kiếm với từ khóa: '{keyword}'")
-            posts = []
-
+            
             # ------------------------------------------------------------
             # Search keyword
-            driver.get("https://www.threads.com/")
             search_button = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, 'a[href="/search"]'))
             )
             search_button.click()
+            
             search_input = WebDriverWait(driver, 10).until(
                 EC.visibility_of_element_located((By.CSS_SELECTOR, "input[placeholder='Search'], input[placeholder='Tìm kiếm']"))
             )
             search_input.clear()  
             search_input.send_keys(keyword)
+            
+            # [SỬA LỖI QUAN TRỌNG NHẤT] - LOGIC CHỜ MỚI
+            
+            # 1. Tìm một phần tử bất kỳ trên trang HIỆN TẠI (trang cũ) để làm "mốc"
+            # Ta sẽ dùng chính ô tìm kiếm làm mốc
+            old_element_reference = driver.find_element(By.CSS_SELECTOR, "input[placeholder='Search'], input[placeholder='Tìm kiếm']")
+            
+            # 2. Thực hiện hành động gây ra việc tải trang mới (nhấn Enter)
             search_input.send_keys(Keys.RETURN)
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, "//div[.//a[contains(@href, '/@')] and .//time[@datetime]]"))
+            
+            # 3. Đợi cho đến khi phần tử "mốc" của trang cũ biến mất (trở nên "stale")
+            # Điều này đảm bảo trang đã bắt đầu chuyển sang trang kết quả tìm kiếm
+            print("Đang chờ trang kết quả tìm kiếm tải...")
+            WebDriverWait(driver, 15).until(
+                EC.staleness_of(old_element_reference)
             )
+            
+            # 4. (Cẩn thận hơn) Đợi cho một bài viết của trang MỚI xuất hiện
+            # Dùng lại selector "vàng" của chúng ta
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'x1lliihq') and .//article]"))
+            )
+            
+            print("Trang kết quả đã tải. Bắt đầu thu thập.")
 
-            # ------------------------------------------------------------
-            # Scrape posts
-
-            extracted_data = scrape_posts(driver, max_scrolls=20)
+            # 5. Bây giờ mới gọi hàm scrape
+            extracted_data = scrape_posts(driver, max_scrolls=scroll_per_keyword)
             if extracted_data:
-                import json
-                print(json.dumps(extracted_data[0], indent=2, ensure_ascii=False))
+                print(f"\n--- THU THẬP THÀNH CÔNG {len(extracted_data)} BÀI VIẾT ---")
 
-            time.sleep(600)
+                # === BẠN CHỈ CẦN GỌI HÀM LƯU FILE Ở ĐÂY ===
 
+                # Ví dụ: Lưu ra cả 2 định dạng file
+                # Tạo tên file động dựa trên từ khóa
+                json_filename = f"threads_posts_{keyword.replace(' ', '_')}.json"
+                csv_filename = f"threads_posts_{keyword.replace(' ', '_')}.csv"
+
+                save_to_json(extracted_data, json_filename)
+                
+                # ============================================
+
+            else:
+                print("--- KHÔNG THU THẬP ĐƯỢC BÀI VIẾT NÀO ---")
 
     except Exception as e:
         logging.error(f"Error during searching: {e}")
@@ -221,7 +291,8 @@ def pipeline(USERNAME, PASSWORD, keywords):
 pipeline(
     USERNAME=THREAD_USERNAME,
     PASSWORD=THREAD_PASSWORD,
-    keywords=["AI Engineer Job"]
+    keywords=["AI Engineer Job"],
+    scroll_per_keyword=1
 )
 
 
